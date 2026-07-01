@@ -346,6 +346,7 @@
             background: #fff;
             border-radius: var(--radius);
             padding: 1rem;
+            min-height: 280px;
         }
 
         @media (max-width: 900px) {
@@ -505,7 +506,7 @@
     }
 
     const LAMBDA = 589.3e-9;
-    let charts = [];
+    let charts = []; // 存储所有图表实例，用于销毁
     let demo = { R:1, I:1, white:true };
 
     // 首页背景
@@ -543,7 +544,7 @@
         ringC.height = 260;
     }
 
-    // 绘制牛顿环光路图（完全匹配你给的第二张图）
+    // 绘制牛顿环光路图
     function drawLightPath() {
         if(!document.getElementById('demo').classList.contains('active')) {
             requestAnimationFrame(drawLightPath);
@@ -611,14 +612,50 @@
     document.getElementById('monoBtn').onclick=()=>{ demo.white=false; drawRing(); };
     function resetDemo(){ demo={R:1,I:1,white:true}; iSlider.value=1; rSlider.value=1; iVal.textContent="1.00"; rVal.textContent="1.00"; drawRing(); }
 
-    // 计算
+    // 数学工具函数
     function mean(a){ return a.reduce((s,x)=>s+x,0)/a.length; }
     function std(a){ let m=mean(a); return Math.sqrt(mean(a.map(x=>(x-m)**2))); }
+    // 最小二乘拟合 y=kx+b
+    function linearFit(xArr,yArr){
+        const n = xArr.length;
+        let sumX=0,sumY=0,sumXY=0,sumXX=0;
+        for(let i=0;i<n;i++){
+            sumX += xArr[i];
+            sumY += yArr[i];
+            sumXY += xArr[i]*yArr[i];
+            sumXX += xArr[i]*xArr[i];
+        }
+        const k = (n*sumXY - sumX*sumY) / (n*sumXX - sumX*sumX);
+        const b = (sumY - k*sumX)/n;
+        // 计算R²
+        const yAvg = mean(yArr);
+        let ssTot=0,ssRes=0;
+        for(let i=0;i<n;i++){
+            const yFit = k*xArr[i]+b;
+            ssTot += (yArr[i]-yAvg)**2;
+            ssRes += (yArr[i]-yFit)**2;
+        }
+        const r2 = 1 - ssRes/ssTot;
+        return {k,b,r2};
+    }
+
+    // 计算主函数 + 绘图（新增库加载检测）
     function doCalculate(){
+        // 检测Chart.js是否加载
+        if (typeof Chart === 'undefined') {
+            document.getElementById('calcResult').textContent = "❌ 错误：图表库Chart.js加载失败，请联网后重试";
+            return;
+        }
+
+        // 销毁旧图表，防止重叠
+        charts.forEach(c=>c.destroy());
+        charts = [];
+
         let k=document.getElementById('kInput').value.split(/\s+/).map(Number);
         let d=document.getElementById('dInput').value.split(/\s+/).map(Number);
         let err=+document.getElementById('errInput').value;
-        let n=k.length>>1;
+        const D2 = d.map(v=>v*v);
+        let n=Math.floor(k.length/2);
         let Rlist=[];
         for(let i=0;i<n;i++){
             let dm=d[i+n], dn=d[i];
@@ -628,18 +665,72 @@
         let ua=std(Rlist)/Math.sqrt(n);
         let ub=err*1e-3/Math.sqrt(3);
         let ur=Math.hypot(ua,ub);
+        let relErr = ur/Ravg*100;
+
+        // 最小二乘拟合 D² = k*m + b
+        const fit = linearFit(k,D2);
+        const fitY = k.map(m=>fit.k*m + fit.b);
+
+        // 输出文字结果
         let s=`==== 牛顿环实验计算结果 ====
 波长 λ = 589.3 nm
 仪器误差 = ${err.toFixed(4)} mm
+最小二乘拟合斜率 k = ${fit.k.toFixed(4)} mm²
+决定系数 R² = ${fit.r2.toFixed(6)}
 
-曲率半径 R = ${Ravg.toFixed(4)} m
+逐差分组计算曲率半径：
+${Rlist.map((v,i)=>`第${i+1}组 R = ${v.toFixed(4)} m`).join('\n')}
+
+平均曲率半径 R = ${Ravg.toFixed(4)} m
 A类不确定度 ua = ${ua.toFixed(4)} m
 B类不确定度 ub = ${ub.toFixed(5)} m
 合成不确定度 uR = ${ur.toFixed(4)} m
-相对不确定度 = ${(ur/Ravg*100).toFixed(2)} %
+相对不确定度 = ${relErr.toFixed(2)} %
 
 最终结果：R = ${Ravg.toFixed(4)} ± ${ur.toFixed(4)} m`;
         document.getElementById('calcResult').textContent=s;
+
+        // 图表1：D² - m 散点+拟合直线（核心最小二乘图）
+        const ctx1 = document.getElementById('c1').getContext('2d');
+        const chart1 = new Chart(ctx1,{
+            type:'scatter',
+            data:{
+                datasets:[
+                    {label:'实验数据 D²-m',data:k.map((val,i)=>({x:val,y:D2[i]})),pointRadius:6,backgroundColor:'#4169E1'},
+                    {label:'拟合直线',type:'line',data:k.map((val,i)=>({x:val,y:fitY[i]})),borderColor:'#ff7b00',borderWidth:2,pointRadius:0}
+                ]
+            },
+            options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:`D²-m 线性拟合 R²=${fit.r2.toFixed(4)}`}},scales:{x:{title:{display:true,text:'级数 m'}},y:{title:{display:true,text:'D² (mm²)'}}}}
+        });
+        charts.push(chart1);
+
+        // 图表2：各组逐差R柱状图
+        const ctx2 = document.getElementById('c2').getContext('2d');
+        const chart2 = new Chart(ctx2,{
+            type:'bar',
+            data:{labels:Rlist.map((_,i)=>`组${i+1}`),datasets:[{label:'各组R值(m)',data:Rlist,backgroundColor:'#36d1dc'}]},
+            options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'逐差分组曲率半径'}}}
+        });
+        charts.push(chart2);
+
+        // 图表3：直径D随级数变化曲线
+        const ctx3 = document.getElementById('c3').getContext('2d');
+        const chart3 = new Chart(ctx3,{
+            type:'line',
+            data:{labels:k,datasets:[{label:'暗环直径D(mm)',data:d,borderColor:'#764ba2',fill:false}]},
+            options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'D-k 变化曲线'}}}
+        });
+        charts.push(chart3);
+
+        // 图表4：残差分布图（D²实测 - D²拟合）
+        const residual = D2.map((val,i)=>val-fitY[i]);
+        const ctx4 = document.getElementById('c4').getContext('2d');
+        const chart4 = new Chart(ctx4,{
+            type:'bar',
+            data:{labels:k,datasets:[{label:'拟合残差',data:residual,backgroundColor:'#f5576c'}]},
+            options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'拟合残差分布'}}}
+        });
+        charts.push(chart4);
     }
 
     // 自动执行首页
